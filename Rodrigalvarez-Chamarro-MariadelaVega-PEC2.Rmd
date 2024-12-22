@@ -1,0 +1,986 @@
+---
+title: "PEC2. Análisis de datos Ómicos."
+author: "<i>Mª de la Vega Rodrigálvarez Chamarro</i>"
+date: '<i>`r format(Sys.Date(),"%e de %B, %Y")`</i>'
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    fig_caption: yes
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    toc_depht: 3
+    number_sections: true
+    latex_engine: xelatex
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    fig_caption: true
+editor_options: 
+  markdown: 
+    wrap: 72
+  chunk_output_type: console
+bibliography: bib/scholar.bib
+csl: bib/apa.csl
+params:
+  data_folder: data
+  results_folder: results
+  train_set: !r 0.67
+abstract: |
+  Description of your vignette
+vignette: |
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r libraries, include=FALSE}
+# Install packages
+# Load packages
+
+library(knitr)
+
+# Librería Bioconductor
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# Lectura de CELFiles
+if (!require(oligo)){
+    BiocManager::install(oligo)
+}
+library(oligo)
+
+# Paquete de calidad
+if (!require(arrayQualityMetrics)){
+  BiocManager::install(arrayQualityMetrics)
+}
+library(arrayQualityMetrics)
+
+# Paquete de anotación
+if (!require(mouse4302.db)){
+  BiocManager::install("mouse4302.db")
+}
+library("mouse4302.db")
+
+# Filtrado y anotación de genes
+if (!require(genefilter)){
+    BiocManager::install(genefilter)
+}
+library(genefilter)
+
+if (!require("limma")){
+  BiocManager::install("limma")
+}
+library("limma")
+
+if (!require(annotate)){
+  BiocManager::install(annotate)
+}
+library(annotate)
+
+if (!require(biomaRt)){
+  BiocManager::install(biomaRt)
+}
+library(biomaRt)
+
+BiocManager::install(c("clusterProfiler", "org.Mm.eg.db"))
+library("clusterProfiler")
+library(org.Mm.eg.db)
+
+```
+
+```{r input, include=FALSE}
+# Input / Output variables
+# Tuning parameters
+# ...
+
+```
+
+```{R CargaDatos, include=FALSE}
+# Preparación de los datos. Filtrado de los datos
+
+# Función para realizar el filtrado de los datos
+filter_microarray <- function(allTargets, seed = 123) {
+  # Configurar la semilla aleatoria
+  print(seed)
+  set.seed(seed)
+  
+  # Filtrar las filas donde 'time' no sea 'hour 2'
+  filtered <- subset(allTargets, time != "hour 2")
+  
+  # Dividir el dataset por grupos únicos de 'infection' + 'agent'
+  filtered$group <- interaction(filtered$infection, filtered$agent)
+  
+  # Seleccionar 4 muestras al azar de cada grupo
+  selected <- do.call(rbind, lapply(split(filtered, filtered$group), function(group_data) {
+    if (nrow(group_data) > 4) {
+      group_data[sample(1:nrow(group_data), 4), ]
+    } else {
+      group_data
+    }
+  }))
+  
+  # Obtener los índices originales como nombres de las filas seleccionadas
+  original_indices <- match(selected$sample, allTargets$sample)
+  
+  # Modificar los rownames usando 'sample' y los índices originales
+  rownames(selected) <- paste0(selected$sample, ".", original_indices)
+  
+  # Eliminar la columna 'group' y devolver el resultado
+  selected$group <- NULL
+  return(selected)
+}
+
+# Simular el dataset basado en la descripción proporcionada
+sample = c("GSM944831", "GSM944838", "GSM944845", "GSM944852", "GSM944859",
+           "GSM944833", "GSM944840", "GSM944847", "GSM944854", "GSM944861",
+           "GSM944834", "GSM944841", "GSM944848", "GSM944855", "GSM944862",
+           "GSM944832", "GSM944839", "GSM944846", "GSM944853", "GSM944860",
+           "GSM944835", "GSM944842", "GSM944849", "GSM944856", "GSM944863",
+           "GSM944836", "GSM944843", "GSM944850", "GSM944857", "GSM944864",
+           "GSM944837", "GSM944844", "GSM944851", "GSM944858", "GSM944865")
+
+allTargets <- data.frame(
+  sample = sample,
+  infection = c(rep("uninfected", 15), rep("S. aureus USA300", 20)),
+  time = c(rep("hour 0", 15), rep("hour 2", 5), rep("hour 24", 15)),
+  agent = c(rep("untreated", 5), rep("linezolid", 5), rep("vancomycin", 5),
+            rep("untreated", 5), rep("untreated", 5), rep("linezolid", 5), rep("vancomycin", 5)),
+  filename = paste0(sample, ".CEL"),
+  color = c(rep("lightblue", 5), rep("pink", 5), rep("lightgreen", 5),
+            rep("grey", 5), rep("blue", 5), rep("red", 5), rep("green", 5))
+)
+
+# Aplicar la función (cambiar 123 por vuestro ID de la UOC u otro número que podáis escribir en el documento)
+result <- filter_microarray(allTargets, seed=25178976)
+
+result$grupo <- c(rep("INF.LIN",4),rep("NOINF.LIN",4),rep("INF.NOTTREAT",4),
+                  rep("NOINF.NOTTREAT",4),rep("INF.VAN",4),rep("NOINF.VAN",4))
+
+# Se crea el objeto AnnotatedDataFrame
+targets <- AnnotatedDataFrame(result)
+
+# Cargar todos los ficheros uno a uno con extensión CEL
+celFiles <- result$filename
+rawData <- read.celfiles(file.path(params$data_folder,celFiles),phenoData=targets)
+
+```
+
+# Resumen ejecutivo
+
+*(breve resumen sobre el proceso y los principales resultados. No debe exceder de una página)*
+
+\newpage
+
+# Introducción y Objetivos
+
+*(Debe de quedar bien claro cuáles son los objetivos de vuestro trabajo. Breves, media página a lo sumo)*
+
+# Métodos
+
+*(Con qué y cómo habéis trabajado. Variará según el caso, pero habitualmente contendrá: Origen (fuente) y naturaleza (tipo) de los datos; herramientas informáticas y bioinformáticas utilizadas. procedimiento general de análisis; métodos utilizados; Una o dos páginas como mucho)*
+
+Para el presente estudio se utilizan los datos en crudo descargados desde el sitio de GEO [https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE38531](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE38531). Estos datos fueron utilizados por la Universidad de Duke, cuyo investigador principal es Sun Hee Ahn, para determinar la expresión génica de los ratones infectados por *Staphylococcus aureu* una vez que han sido tratados con *linezolid* y *vancomycin*. En el presente estudio se realiza un filtrado de los datos donde se cuenta con los siguientes grupos:
+
+* 24 ratones no infectados los cuales 4 de ellos no an recibido ningún tratamiento, 4 de ellos han sido inyectados con *linezolid* y cuatro de ellos han sido inoculados con *vancomycin*.
+* 24 ratones infectados con el virus *Staphylococcus aurea* y, al igual en el grupo anterior, a las 24 h, 4 de ellos fuero inoculados con *linezolid*, cualtro de ellos con *vancomycin* y 4 de ellos no recibieron ningún tipo de tratamiento.
+
+Para cada individuo se ha tomado un total de `r nrow(exprs(rawData))` muestras con el objeto de analizar la expresión génica de los diferentes individuos ante las diferentes condiciones generadas. Antes de proceder con la comparación de la expresión génica de los diferentes grupos, se realiza un análisis exploratorio de los mismos para verificar su calidad. Una vez se han verificado los diferentes datos y se han hecho las transformaciones necesarias, se procede con el analisis de la expresión génica.
+
+**TODO** Detallar mejor los análisis de datos en los diferentes pasos que se an realizado
+
+
+# Resultados
+
+*(Los resultados deben responder las preguntas planteadas. Si la pregunta es ambigua (¨Exploración de los datos”) o admite distintas interpretaciones podéis ser flexibles, pero explicad siempre porque hacéis lo que hacéis, y, ante la duda, referiros a los materiales y ejemplos de referencia. La mejor herramienta para redactar el informe es Rmarkdown o Quarto 1 que permiten generar documentos que integran, explicaciones, análisis y resultados y os prepara para el trabajo profesional en bioinformática. Es importante que vuestro informe no sea un volcado de código y salidas de R sin explicaciones, debe de ser un texto legible y fácil de seguir. Obviamente, esto no es una regla estricta. Si, en ocasiones, (de tablas o gráficos que formen parte de la explicación, por el contexto tiene sentido que se vean algunas instrucciones de R, adelante con ellas. pero no deben impedir leer el documento. Extension habitual 5-10 páginas)*
+
+***Análisis exploratorio y control de calidad***
+
+Antes de realizar el análisis de los datos, se procede a realizar un estudio exploratorio de los datos y un control de calidad de los mismos para ver si existe alguna anormalidad en los datos o si es necesario alguna transformación de los mismos.
+
+En el diagrama de cajas que se muestra en la Figura \ref{fig:g1}, que muestra la distribución de las intensidades en crudo tomadas en las diferentes muestras, se puede observar que no existe ningún dato que difiera en gran medida de los otros. Se puede ver que, independientemente del grupo al que pertenecen los valores, el rango de valores en el que se mueven es muy similar y el valor medio es muy similar entre ellos. Existe una ligera diferencia en una de las muestras infectadas con el virus que no ha recibido tratamiento, pero esa diferencia se puede considerar despreciable.
+
+```{r fig.cap="Intensidad distribución muestras \\label{fig:g1}",fig.align='center', fig.width=10, fig.height=5}
+#Diagrama de cajas
+
+sampleNames <- as.character(result$grupo)
+sampleColor <- as.character(result$color)
+
+boxplot(rawData, which="all",las=2, main="Distribución intensidad datos en crudo", 
+        cex.axis=0.6, col=sampleColor, names=sampleNames)
+legend("topright", legend = c("US3000 - linezolid", "No infectado - linezolid", 
+                              "US3000 - sin tratamiento","No infectado - Sin Tratamiento",
+                              "US3000 - vancomycin","No infectado - vancomycin"),
+       fill = c("red", "pink", "blue","lightblue","green","lightgreen"), title = "Grupos")
+
+```
+
+En la \ref{fig:g2}, se ha realizado un agrupamiento de los datos donde se pueden observar 3 grupos distribuidos de las siguiente manera:
+
+* Un primer grupo que contiene 2 muestras *GSM944840* y *GSM944856* las cuales una ha sido infectado por el virus y otra más. Se puede observar en el diagrama de cajas, el rango de valores de las intensidades es menor y también la mediana.
+* Existe un segundo grupo, mucho más extenso, que contiene 11 muestras y que está formado por todas aquellas muestras que no han sido infectadas por el virus.
+* Y por último, un tercer grupo que contiene todas aquellas muestras que sí que han sido infectadas con el virus.
+
+```{r fig.cap="Clusterización \\label{fig:g2}",fig.align='center', fig.width=10, fig.height=5}
+# Agrupación por clusters
+clust.euclid.average <- hclust(dist(t(exprs(rawData))),method="average")
+plot(clust.euclid.average, labels<-sampleNames,main="Clustering jerarquizado datos en crudo",cex=0.7,hang=-1 )
+
+```
+
+Como se puede observar, excepto 2 muestras que han sido clasificadas de forma independiente, se han creado dos grupos uno que contiene todas aquellas muestras que han sido infectadas y otro grupo con aquellas que no lo han sido.
+
+Finalmente, se procede a realizar un análisis de componentes (PCA) con el objeto de reducir la dimensionalidad de la muestra y observar como se agrupan y explican las diferentes muestras.
+
+```{R AnalisisPCA, include=FALSE}
+# Función para realizar una representacion de PCA
+
+plotPCA <- function ( X, labels=NULL, colors=NULL, dataDesc="", scale=FALSE, 
+                      formapunts=NULL, myCex=0.8,...)
+{
+  pcX<-prcomp(t(X), scale=scale) # o prcomp(t(X))
+  loads<- round(pcX$sdev^2/sum(pcX$sdev^2)*100,1)
+  xlab<-c(paste("PC1",loads[1],"%"))
+  ylab<-c(paste("PC2",loads[2],"%"))
+  if (is.null(colors)) colors=1
+  plot(pcX$x[,1:2],xlab=xlab,ylab=ylab, col=colors, pch=formapunts, 
+       xlim=c(min(pcX$x[,1])-100000, max(pcX$x[,1])+100000),ylim=c(min(pcX$x[,2])-100000, max(pcX$x[,2])+100000))
+  text(pcX$x[,1],pcX$x[,2], labels, pos=3, cex=myCex)
+  title(paste("Plot of first 2 PCs for expressions in", dataDesc, sep=" "), cex=0.8)
+  legend("bottomright", legend = c("US3000 - linezolid", "No infectado - linezolid", 
+                                "US3000 - sin tratamiento","No infectado - Sin Tratamiento",
+                                "US3000 - vancomycin","No infectado - vancomycin"),
+         col = c("red", "pink", "blue","lightblue","green","lightgreen"), 
+         pch = c(15,22,16,21,17,24), title = "Grupos")
+}
+
+```
+
+Una vez realizado el análisis de componentes principales, se puede ver que con las 2 primeras componentes se puede llegar a explicar casi un 55% de la variabilidad. Además, en la \ref{fig:g3} se puede ver que hay una clara diferencia entre aquellos grupos que fueron infectado y cuales no. Si se tratase una linea diagonal imaginaria se vería que los grupos infectados quedarían en la parte superior izquierda y los no infectados en la parte inferior derecha.
+
+```{r fig.cap="Análisis PCA \\label{fig:g3}",fig.align='center', fig.width=10, fig.height=5}
+# Representación gráfica del Análisis de componentes principales (PCA)
+plotPCA(exprs(rawData), labels=sampleNames, dataDesc="raw data", colors=sampleColor,
+        formapunts=c(rep(15,4),rep(22,4),rep(16,4),rep(21,4),rep(17,4),rep(24,4)), 
+        myCex=0.5)
+
+```
+
+Para un análisis de calidad de los datos se ha ejecutado el paquete de R *arrayQualityMetrics*, el cuál ha sido ejecutado y cuyos resultados se pueden ver en el *Anexo I. CAlidad de los datos* que se adjunta al presente informe y donde se pueden ver unos resultados similares.
+
+```{R arrayQM, include = TRUE}
+## Control de calidad con el paquete `arrayQualityMetrics`
+# Avoid re-running it each time  the script is executed.
+rerun <- FALSE
+if(rerun){
+  arrayQualityMetrics(rawData,  reporttitle="Anexo I. Calidad de los datos", force=TRUE)
+}
+
+```
+
+Antes de continuar con el análisis y el estudio de los datos se procederá a la normalización de los datos y que todos los valores se encuentren en el mismo rango de valores utilizando el método de RMA.
+
+```{R normalizacion, include = TRUE}
+# Construcción del Expression set
+eset<-rma(rawData)
+write.exprs(eset, file.path(params$results_folder, "NormData.txt"))
+
+```
+
+Como resultado de la normalización, se ha obtenido un *ExpressionSet* formado por `r dim(exprs(eset))[1]` columnas y `r dim(exprs(eset))[2]` columnas, una por cada muestra.
+
+***Filtrado de los datos***
+
+Una vez que los datos han sido normalizados, se procede a realizar una selección de genes para facilitar el estudio. Se va a proceder a eliminar aquellos genes los cuales tienen poca variabilidad ya que, al variar poco entre los grupos es probable que no sean candidatos para encontrar diferencias con el objeto de poder identificar que genes tienen una mayor representación biológica.
+
+En este estudio se procederá a seleccionar el 10% de las sondas que presentan una mayor variabilidad.
+
+Para poder realizar el filtrado de los datos, hay que indicar la anotación del ExpressionSet. Tal y como índica en el estudio del que los datos han sido obtenidos, la plataforma utilizada ha sido "Affymetrix Affymetrix Mouse430_2 Array annotation data (chip mouse4302) assembled using data from public repositories"Affymetrix Mouse Genome 430 2.0 Array" por lo que la librería de anotación a usar de BioConductor ha sido "mouse4302.db". 
+
+```{R FiltradoDatos, include=FALSE}
+# Filtrado de los datos. Variabilidad de más del 90%
+annotation(eset)<-"mouse4302.db"
+eset_filtered <- nsFilter(eset, var.func=IQR,
+                          var.cutoff=0.9, var.filter=TRUE, require.entrez=FALSE,
+                          filterByQuantile=TRUE)
+#Número de genes borrados
+print(eset_filtered)
+
+#Número de genes incluidos en el estudio
+print(eset_filtered$eset)
+dim(eset_filtered$eset)
+
+```
+
+El punto de corte del filtrado se ha fijado en 0.9 con el objeto de tener el 10%, en base a cuartiles, de las sondas con más variabilidad e independientemente de que tengan anotación *Entrez* o no, hace que haya un total de *`r dim(eset_filtered$eset)[1]`* genes más representativos con los que llevar a cabo el análisis de expresión génica. Se han eliminado `r eset_filtered$filter.log$numDupsRemoved` elementos duplicados, `r eset_filtered$filter.log$numLowVar` elementos de baja variabilidad y `r  eset_filtered$filter.log$feature.exclude` *features* excluidas.
+
+Una vez filtrados los datos, se obtendrá una matriz filtrada para proceder con la selección de genes.
+
+```{R Datosfiltrados, include = TRUE}
+# Matriz de datos filtrados
+
+filteredEset <- eset_filtered$eset
+filteredData <- exprs(filteredEset)
+colnames(filteredData) <- rownames(pData(eset_filtered$eset))
+
+```
+
+***Construcción de la matriz de diseño y contrastes***
+
+Para construir la matriz de diseño, hace falta información acerca de los factores experimentales o los grupos del estudio.
+
+En este conjunto de muestras,tras la selección de las mismas, existen 12 ratones que han sido infectados con el virus *Staphylococcus aureas* Y 12 ratones no infectados y considerados de control. Dentro de cada grupo, 4 ratones no han sido tratados con ningún medicamento, 4 ratones han sido tratados con linezolid y 4 con vancomycin, por lo que existen dos factores. Los seis grupos que existen son:
+
+* Grupo 1. Infectado y tratado con Linezolid (INF.LIN)
+* Grupo 2. No infectado y tratado con Linezolid (NOINF.LIN)
+* Grupo 3. Infectado y sin ningún tratamiento. (INF.NOTTREAT)
+* Grupo 4. No infectado y sin ningún tratamiento. (NOINF.NOTTREAT)
+* Grupo 5. Infectado y tratado con Vancomycin. (INF.VAN)
+* Grupo 6. No infectado y tratado con vancomycin. (NOINF.VAN)
+
+Una vez definidos los grupos se proceder a construir la matriz de diseño que quedará de la siguiente forma:
+
+```{R MatrizDiseño, include = FALSE}
+# Creación de la matriz de diseño
+
+lev <- factor(result$grupo, levels = unique(result$grupo))
+design <-model.matrix(~0+lev,pData(filteredEset))
+colnames(design) <- levels(lev)
+rownames(design) <- sampleNames
+
+```
+
+```{R MatrizDiseñoVer, include=TRUE,echo=FALSE}
+# Visualización de la matriz de diseño
+
+knitr::kable(design,
+             col.names = gsub("[.]", " ", colnames(design)),
+             booktabs = TRUE,
+             caption = 'Matriz de diseño')
+
+```
+
+El objetivo del estudio es comparar las diferencias en las expresiones génicas de los ratones infectados y de los no infectados dentro del grupo del tratamiento en el que se encuentran. Para ello, se construirá la matriz de contrastes de la siguiente manera:
+
+* INF.LIN vs NOINF.LIN
+* INF.NOTTREAT vs NOINF.NOTTREAT
+* INF.VAN vs NOINF.VAN
+
+Las filas de la matriz de contrastes representan las comparaciones que se van a realizar, en este caso se tendrían 6 filas que serían los diferentes grupos existentes y 3 columnas, una por cada una de las comparaciones.
+
+```{R matrizContraste, include=FALSE}
+# Creación de la matriz de contraste
+mCont <- makeContrasts(LIN_INF_NOINF = INF.LIN - NOINF.LIN, 
+                       NOTTREAT_INF_NOINF = INF.NOTTREAT - NOINF.NOTTREAT,
+                       VAN_INF_NOINF = INF.VAN - NOINF.VAN,
+                       levels = design)
+
+```
+
+```{R MatrizContraste, include = TRUE}
+# Visualización de la matriz de contraste
+knitr::kable(mCont,
+             col.names = gsub("[.]", " ", colnames(mCont)),
+             booktabs = TRUE,
+             caption = 'Matriz de contraste')
+
+```
+
+***Obtención de las listas de genes diferencialmente expresados para cada comparación***
+
+Una vez definida la matriz de diseño y los contrastes, se procede a estimar el modelo y los contrastes, así como las pruebas de significación que ayudarán a decidir, para cada gen y para cada comparación, si pueden considerarse de expresión diferencial. Para ello se ha usado el paquete limma.
+ 
+```{R ConstruccionModelo, include = FALSE}
+ # Construcción del modelo lineal
+
+fit <- lmFit(filteredEset,design)
+fit.main <- contrasts.fit(fit,mCont)
+fit.main <- eBayes(fit.main)
+
+```
+
+```{r FuncionHeatMap, include = TRUE}
+# Función para generar los mapas de calor
+plotHeatmap <- function ( X, title="")
+{
+  selectedData <- filteredData[X,]
+  
+  #HEATMAP PLOT
+  my_palette <- colorRampPalette(c("yellow", "red"))(n = 299)
+  library(gplots)
+  heatmap.2(selectedData,
+            Rowv=TRUE,
+            Colv=TRUE,
+            main=title,
+            scale="row",
+            col=my_palette,
+            sepcolor="white",
+            sepwidth=c(0.05,0.05),
+            cexRow=0.5,
+            cexCol=0.9,
+            key=TRUE,
+            keysize=1.5,
+            density.info="histogram",
+            ColSideColors=sampleColor,
+            tracecol=NULL,
+            srtCol=30)
+  
+}
+
+```
+
+Una vez que se ha calculado el modelo, se obtiene para cada uno de los contrastes los genes más significativos. El punto de corte se establece con el p-valor, seleccionando únicamente aquella de lista de genes cuyo p-valor es menor de 0.05 y el mínimo cambio de pliegues es igual a 2. 
+
+```{R GenesDiferenciados, include=FALSE}
+# Tratamiento Linezolid - diferencia entre Infectados y no infectados
+topTabLIN <-  topTable (fit.main, number=nrow(fit.main), coef="LIN_INF_NOINF", 
+                      adjust="fdr", lfc=2, p.value=0.05)
+
+# Sin tratamiento - diferencia entre Infectados y no infectados
+topTabNOTTREAT <-  topTable (fit.main, number=nrow(fit.main), coef="NOTTREAT_INF_NOINF", 
+                        adjust="fdr", lfc=2, p.value=0.05)
+
+# Vancomycin - diferencia entre Infectados y no infectados
+topTabVAN <-  topTable (fit.main, number=nrow(fit.main), coef="VAN_INF_NOINF", 
+                             adjust="fdr", lfc=2, p.value=0.05)
+
+```
+
+Para aquellos ratones que han sido tratados con Linezolid se han identificado `r dim(topTabLIN)[1]` genes. En la siguiente tabla se muestra una representación de los genes más significativos. 
+
+```{R GenesSignificatosLINEZOID, include=TRUE,echo=FALSE}
+# Linezolid. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(head(topTabLIN),
+             col.names = gsub("[.]", " ", colnames(topTabLIN)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados LINEZOLID')
+
+```
+
+Además, como se puede ver en el mapa de calor, se puede ver que hay una clara diferencia entre el grupo de infectados (rojo, azul, verde) y los no infectados (rosa, azul claro, verde claro).
+
+```{r fig.cap="Mapa de calor. Linezolid Infectados vs No Infectados \\label{fig:g4}",fig.align='center', fig.width=10, fig.height=5}
+# Tabla de los genes diferencialmente expresados 
+#Linezolid. Infectados vs No Infectados
+selectedRows <- rownames(filteredData) %in% rownames(topTabLIN)
+title <- paste("HeatMap LINEZOLID", "Infectados vs No Infectados FC>=2", sep="\n")
+plotHeatmap(selectedRows,title)
+
+```
+
+Para aquellos ratones que no han sido tratados, se ha identificado un total de `r dim(topTabNOTTREAT)` genes diferencialmente expresados.
+
+```{R GenesSignificatosNoTratados, include=TRUE,echo=FALSE}
+# NoTratados. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(head(topTabNOTTREAT),
+             col.names = gsub("[.]", " ", colnames(topTabNOTTREAT)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados No Tratados')
+
+```
+
+En el mapa de calor, también se puede ver una clara diferencia entre aquellos que están infectados y no están infectados.
+
+```{r fig.cap="Mapa de calor. No tratados. Infectados vs No Infectados \\label{fig:g5}",fig.align='center', fig.width=10, fig.height=5}
+# Tabla de los genes diferencialmente expresados 
+#No tratados. Infectados vs No Infectados
+selectedRows <- rownames(filteredData) %in% rownames(topTabNOTTREAT)
+title <- paste("HeatMap Sin Tratamiento", "Infectados vs No Infectados FC>=2", sep="\n")
+plotHeatmap(selectedRows,title)
+
+```
+
+Para aquellos ratones que han sido tratados con Vancomycin, se ha identificado un total de `r dim(topTabVAN)` genes diferencialmente expresados.
+
+```{R GenesSignificatosVancomycina, include=TRUE,echo=FALSE}
+# NoTratados. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(head(topTabVAN),
+             col.names = gsub("[.]", " ", colnames(topTabVAN)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados. Vancomycina.')
+
+```
+
+En el mapa de calor, también se puede ver una clara diferencia entre aquellos que están infectados y no están infectados.
+
+```{r fig.cap="Mapa de calor. No tratados. Infectados vs No Infectados \\label{fig:g6}",fig.align='center', fig.width=10, fig.height=5}
+# Tabla de los genes diferencialmente expresados 
+#Vancomycin. Infectados vs No Infectados
+selectedRows <- rownames(filteredData) %in% rownames(topTabVAN)
+title <- paste("HeatMap VANCOMYCIN", "Infectados vs No Infectados FC>=2", sep="\n")
+plotHeatmap(selectedRows,title)
+
+```
+
+Las tablas completas de genes expresados diferencialmente se pueden ver de forma completa en el **Apendice A**.
+
+A continuación, se puede ver una tabla con el número de genes que tienen una alta significancia, aquellos que no tienen significancia y los que tienen una baa significancia por estudio realizado.
+
+```{R genesExpresadoDiferencial, include = FALSE}
+# Detección de genes expresados diferencialmente
+rtdo_contrates <- decideTests(fit.main, method = "separate", adjust.method = "fdr", 
+                       p.value = 0.05, lfc = 2)
+
+# LINZENOLID
+genes_up_LIN <- rownames(filteredEset)[rtdo_contrates[, "LIN_INF_NOINF"] == 1]
+genes_notSig_LIN <- rownames(filteredEset)[rtdo_contrates[, "LIN_INF_NOINF"] == 0]
+genes_down_LIN <- rownames(filteredEset)[rtdo_contrates[, "LIN_INF_NOINF"] == -1]
+up_LIN <- length(genes_up_LIN)
+notSign_LIN <- length(genes_notSig_LIN)
+down_LIN <- length(genes_down_LIN)
+
+# SIN TRATAMIENTO
+genes_up_NT <- rownames(filteredEset)[rtdo_contrates[, "NOTTREAT_INF_NOINF"] == 1]
+genes_notSig_NT <- rownames(filteredEset)[rtdo_contrates[, "NOTTREAT_INF_NOINF"] == 0]
+genes_down_NT <- rownames(filteredEset)[rtdo_contrates[, "NOTTREAT_INF_NOINF"] == -1]
+up_NT <- length(genes_up_NT)
+notSign_NT <- length(genes_notSig_NT)
+down_NT <- length(genes_down_NT)
+
+# VANCOMICINA
+genes_up_VAN <- rownames(filteredEset)[rtdo_contrates[, "VAN_INF_NOINF"] == 1]
+genes_notSig_VAN <- rownames(filteredEset)[rtdo_contrates[, "VAN_INF_NOINF"] == 0]
+genes_down_VAN <- rownames(filteredEset)[rtdo_contrates[, "VAN_INF_NOINF"] == -1]
+up_VAN <- length(genes_up_VAN)
+notSign_VAN <- length(genes_notSig_VAN)
+down_VAN <- length(genes_down_VAN)
+
+```
+
+|      | **Linezolid** | **Sin Tratamiento** | **Vancomicina** |
+|------|------|------|------|
+|:**Alta Significancia (UP)**   | :`r up_LIN`:  | :`r up_NT`:  | :`r up_VAN`: |
+|:**Sin Significancia**         | :`r notSign_LIN`:  |:`r notSign_NT`:|:`r notSign_VAN`:|
+|:**Baja Significancia (DOWN)** | :`r down_LIN`:| :`r down_NT`:|:`r down_VAN`:|
+
+: Número de Genes diferencialmente expresados
+
+Finalmente, se procede a comparar la lista de genes expresados diferencialmente más significativos de los tres contrastes realizados a través de un diagrama de VENN donde se puede observar que de todos los genes diferencialmente expresados, son relevantes en los 3 grupos.
+
+```{R listadoGenesComunes, include=FALSE}
+common_UP_LIN_NT <- intersect(genes_up_LIN, genes_up_NT)
+common_UP_LIN_VAN <- intersect(genes_up_LIN, genes_up_VAN)
+common_UP_NT_VAN <- intersect(genes_up_NT, genes_up_VAN)
+common_UP_LIN_NT_VAN <- intersect(common_UP_LIN_NT,common_UP_LIN_VAN )
+```
+
+```{R genesComunes, include = FALSE}
+# Genes comunes expresados diferencialmente a los tres estudios
+vennTable <- vennCounts(rtdo_contrates,include="up")
+
+knitr::kable(vennTable[1:dim(vennTable)[1],1:dim(vennTable)[2]],
+             col.names = gsub("[.]", " ", c("Linezolid","Sin Tratamiento",
+                                            "Vancomizina","N Comunes")),
+             booktabs = TRUE,
+             aption = 'Genes comunes en los diferentes estudios')
+
+```
+
+
+```{r fig.cap="Diagrama de Venn. Genes comunes \\label{fig:g7}",fig.align='center', fig.width=10, fig.height=5}
+# Diagrama de Venn Genes altamente diferenciados entre grupos
+
+vennDiagram(rtdo_contrates, include = "up")
+
+```
+
+***Anotación de los genes****
+
+Se han obtenido las listas de los genes más significativos en los diferentes estudios de contrastes. En todas las tablas, los genes se encuentran anotados con el identificador del proveedor del análisis, que en este ocasión se ha realizado con el chip de Affymetrix *mouse 4302*. Se anotan los genes con bases de datos publicas tales como "Symbol", "EntrezID" o "EnsemblID" para poder realizar los estudios de relevancia biológica.
+
+A continuación, se muestra un listado de los 10 primeros genes más relevantes expresados significativamente para cada uno de los estudios. En el **Apéndice B** se puede ver la lista completa de genes.
+
+```{R AnotacionGenes, include=FALSE}
+# Estudio de contraste Linezolid
+topTabLIN$PROBEID <- rownames(topTabLIN)
+myProbes_LIN <- topTabLIN$PROBEID
+# Se realiza la anotación de los genes
+geneAnots_LIN <- AnnotationDbi::select(mouse4302.db, keys=myProbes_LIN,
+                    columns = c("SYMBOL","GENENAME","ENSEMBL","ENTREZID"))
+
+# Se mezclan ambas tablas por PROBEID, para ordenarlas se mantiene el valor de B
+annotatedTopTab_LIN <- merge(x=geneAnots_LIN, y=topTabLIN, by.x="PROBEID", by.y="PROBEID")
+# Se ordenan las claves en orden descendente pro la columna B
+sortAnnotatedTopTabLIn <- annotatedTopTab_LIN[order(-topTabLIN$B),
+                                 c("PROBEID","SYMBOL","GENENAME","ENSEMBL","ENTREZID",
+                                   "B")]
+sortAnnotatedTopTabLIn <- sortAnnotatedTopTabLIn[!is.na(sortAnnotatedTopTabLIn$SYMBOL),]
+dim(sortAnnotatedTopTabLIn)
+
+# Estudio de contraste Sin tratamiento
+topTabNOTTREAT$PROBEID <- rownames(topTabNOTTREAT)
+myProbes_NOTTREAT <- topTabNOTTREAT$PROBEID
+# Se realiza la anotación de los genes
+geneAnots_NOTTREAT <- AnnotationDbi::select(mouse4302.db, keys=myProbes_NOTTREAT,
+                        columns = c("SYMBOL","GENENAME","ENSEMBL","ENTREZID"))
+
+# Se mezclan ambas tablas por PROBEID, para ordenarlas se mantiene el valor de B
+annotatedTopTab_NOTTREAT <- merge(x=geneAnots_NOTTREAT, y=topTabNOTTREAT, by.x="PROBEID", by.y="PROBEID")
+# Se ordenan las claves en orden descendente pro la columna B
+sortAnnotatedTopTabNOTTREAT <- annotatedTopTab_NOTTREAT[order(-topTabNOTTREAT$B),
+                                              c("PROBEID","SYMBOL","GENENAME","ENSEMBL","ENTREZID",
+                                                "B")]
+sortAnnotatedTopTabNOTTREAT <- sortAnnotatedTopTabNOTTREAT[!is.na(sortAnnotatedTopTabNOTTREAT$SYMBOL),]
+dim(sortAnnotatedTopTabNOTTREAT)
+
+# Estudio de contraste Vancomicina
+topTabVAN$PROBEID <- rownames(topTabVAN)
+myProbes_VAN <- topTabVAN$PROBEID
+# Se realiza la anotación de los genes
+geneAnots_VAN <- AnnotationDbi::select(mouse4302.db, keys=myProbes_VAN,
+                             columns = c("SYMBOL","GENENAME","ENSEMBL","ENTREZID"))
+
+# Se mezclan ambas tablas por PROBEID, para ordenarlas se mantiene el valor de B
+annotatedTopTab_VAN <- merge(x=geneAnots_VAN, y=topTabVAN, by.x="PROBEID", by.y="PROBEID")
+# Se ordenan las claves en orden descendente pro la columna B
+sortAnnotatedTopTabVAN <- annotatedTopTab_VAN[order(-topTabVAN$B),
+                                                        c("PROBEID","SYMBOL","GENENAME","ENSEMBL","ENTREZID",
+                                                          "B")]
+sortAnnotatedTopTabVAN <- sortAnnotatedTopTabVAN[!is.na(sortAnnotatedTopTabVAN$SYMBOL),]
+dim(sortAnnotatedTopTabVAN)
+
+# Se realiza la anotación de los genes comunes a los tres estudios
+geneAnots_common <- AnnotationDbi::select(mouse4302.db, keys=common_UP_LIN_NT_VAN,
+                                       columns = c("SYMBOL","GENENAME","ENSEMBL","ENTREZID"))
+
+
+```
+
+
+```{R GenesAnotados1, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Linezolid
+knitr::kable(head(sortAnnotatedTopTabLIn[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")],10),
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Linezolid')
+
+```
+
+```{R GenesAnotados2, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste Sin Tratamiento
+knitr::kable(head(sortAnnotatedTopTabNOTTREAT[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                                 "ENTREZID")],10),
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Sin tratamiento')
+
+```
+
+```{R GenesAnotados3, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Vancomicina
+knitr::kable(head(sortAnnotatedTopTabVAN[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                            "ENTREZID")],10),
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Vancomizina')
+
+```
+
+En la siguiente lista se ven los genes representados significativamente que son comunes a los tres estudios.
+
+```{R GenesAnotados7, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Vancomicina
+knitr::kable(head(geneAnots_common[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                            "ENTREZID")],10),
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Comunes')
+
+```
+
+***Análisis de la significación biológica***
+
+Una vez que los genes han sido anotados, se realiza el estudio de significación biológica. Para ello se consulta en la base de datos *Gene Ontology* (GO) con el objeto de realizar diferentes análisis estadísticos para identificar que anotaciones tienen una frecuencia sorprendentemente más alta.
+
+Por cada estudio de contraste realizado se va a mostrar un gráfico de barras donde se mostrará los *pathways* más enriquecidos en cada estudio de contraste y una red de genes relacionando los genes con los pathwais más enriquecidos.
+
+*Significación biológica - Infectados y no Infectados para LINEZOLID*
+
+```{R SignificaciónBiologica_LIN, include = FALSE}
+genes_ENTREZ_LIN <- sortAnnotatedTopTabLIn$ENTREZID
+
+ego_LIN <- enrichGO(
+  gene = genes_ENTREZ_LIN,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",                # Ontología: BP (Biological Process), MF (Molecular Function), CC (Cellular Component)
+  pAdjustMethod = "fdr",      # Método de ajuste para múltiples pruebas
+  pvalueCutoff = 0.05,       # Umbral de significancia
+  qvalueCutoff = 0.2         # Umbral de Q-valor
+)
+
+# Ver los resultados
+head(ego_LIN)
+
+ego_LIN_df <- as.data.frame(ego_LIN)
+head(ego_LIN_df)
+
+```
+
+```{r fig.cap="Gráficas significancia biológica LINEZOLID \\label{fig:g8}",fig.align='center', fig.width=10, fig.height=6}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,2))
+barplot(ego_LIN, showCategory = 10, title = "Top 10 GO Terms")
+dotplot(ego_LIN, showCategory = 10, title = "GO Enrichment Dot Plot")
+par(mfrow=c(1,1))
+
+```
+
+```{r fig.cap="Red de genes expresados diferencialmente LINEZOLID \\label{fig:g9}",fig.align='center', fig.width=10, fig.height=5}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,1))
+cnetplot(ego_LIN, categorySize = "geneNum", schowCategory = 15, vertex.label.cex = 0.75)
+par(mfrow=c(1,1))
+
+```
+
+*Significación biológica - Infectados y no Infectados para SIN TRATAMIENTO*
+
+```{R SignificaciónBiologica_NT, include = FALSE}
+genes_ENTREZ_NT <- sortAnnotatedTopTabNOTTREAT$ENTREZID
+
+ego_NT <- enrichGO(
+  gene = genes_ENTREZ_NT,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",                # Ontología: BP (Biological Process), MF (Molecular Function), CC (Cellular Component)
+  pAdjustMethod = "fdr",      # Método de ajuste para múltiples pruebas
+  pvalueCutoff = 0.05,       # Umbral de significancia
+  qvalueCutoff = 0.2         # Umbral de Q-valor
+)
+
+# Ver los resultados
+head(ego_NT)
+
+ego_NT_df <- as.data.frame(ego_NT)
+head(ego_NT_df)
+
+```
+
+```{r fig.cap="Gráficas significancia biológica SIN TRATAMIENTO \\label{fig:g10'}",fig.align='center', fig.width=10, fig.height=6}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,2))
+barplot(ego_NT, showCategory = 10, title = "Top 10 GO Terms")
+dotplot(ego_NT, showCategory = 10, title = "GO Enrichment Dot Plot")
+par(mfrow=c(1,1))
+
+```
+
+```{r fig.cap="Red de genes expresados diferencialmente SIN TRATAMIENTO \\label{fig:g11}",fig.align='center', fig.width=10, fig.height=5}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,1))
+cnetplot(ego_NT, categorySize = "geneNum", schowCategory = 15, vertex.label.cex = 0.75)
+par(mfrow=c(1,1))
+
+```
+
+*Significación biológica - Infectados y no Infectados para VANCOMICINA*
+
+```{R SignificaciónBiologica_VAN, include = FALSE}
+# Lista de genes significativos (símbolos)
+genes_ENTREZ_VAN <- sortAnnotatedTopTabVAN$ENTREZID
+
+ego_VAN <- enrichGO(
+  gene = genes_ENTREZ_VAN,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",                # Ontología: BP (Biological Process), MF (Molecular Function), CC (Cellular Component)
+  pAdjustMethod = "fdr",      # Método de ajuste para múltiples pruebas
+  pvalueCutoff = 0.05,       # Umbral de significancia
+  qvalueCutoff = 0.2         # Umbral de Q-valor
+)
+
+# Ver los resultados
+head(ego_VAN)
+
+ego_VAN_df <- as.data.frame(ego_VAN)
+head(ego_VAN_df)
+
+```
+
+```{r fig.cap="Gráficas significancia biológica VANCOMIZINA \\label{fig:g12'}",fig.align='center', fig.width=10, fig.height=6}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,2))
+barplot(ego_VAN, showCategory = 10, title = "Top 10 GO Terms")
+dotplot(ego_VAN, showCategory = 10, title = "GO Enrichment Dot Plot")
+par(mfrow=c(1,1))
+
+```
+
+```{r fig.cap="Red de genes expresados diferencialmente VANCOMIZINA \\label{fig:g13}",fig.align='center', fig.width=10, fig.height=5}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,1))
+cnetplot(ego_VAN, categorySize = "geneNum", schowCategory = 15, vertex.label.cex = 0.75)
+par(mfrow=c(1,1))
+
+```
+
+*Significación biológica - Genes comunes en los tres estudios*
+
+```{R SignificaciónBiologica_COMMON, include = FALSE}
+# Lista de genes significativos (símbolos)
+genes_ENTREZ_COMMON <- geneAnots_common$ENTREZID
+
+ego_COMMON <- enrichGO(
+  gene = genes_ENTREZ_COMMON,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",                # Ontología: BP (Biological Process), MF (Molecular Function), CC (Cellular Component)
+  pAdjustMethod = "fdr",      # Método de ajuste para múltiples pruebas
+  pvalueCutoff = 0.05,       # Umbral de significancia
+  qvalueCutoff = 0.2         # Umbral de Q-valor
+)
+
+# Ver los resultados
+head(ego_COMMON)
+
+ego_COMMON_df <- as.data.frame(ego_COMMON)
+head(ego_COMMON_df)
+
+```
+
+```{r fig.cap="Gráficas significancia biológica GENES COMUNES \\label{fig:g14'}",fig.align='center', fig.width=10, fig.height=6}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,2))
+barplot(ego_COMMON, showCategory = 10, title = "Top 10 GO Terms")
+dotplot(ego_COMMON, showCategory = 10, title = "GO Enrichment Dot Plot")
+par(mfrow=c(1,1))
+
+```
+
+```{r fig.cap="Red de genes expresados diferencialmente GENES COMUNES \\label{fig:g15}",fig.align='center', fig.width=10, fig.height=5}
+# Representación gráfica de la matriz de correlación
+par(mfrow=c(1,1))
+cnetplot(ego_COMMON, categorySize = "geneNum", schowCategory = 15, vertex.label.cex = 0.75)
+par(mfrow=c(1,1))
+
+```
+
+# Discusión
+
+*(Incluso si el estudio no es original, puede tener sentido que reflexionéis sobre las limitaciones del estudio y que proporcionéis vuestras conclusiones, más sobre lo que habéis hecho que sobre el problema biológico que acompaña vuestra PEC.; no más de una página.)*
+
+# Referencias
+
+\newpage
+
+# Apéndices
+
+## Apendice A. Tablas de genes mas significativos por contraste
+
+### Linezolid. Genes diferencialmente expresados Infectado y No Infectado
+
+```{R GenesSignificatosLINEZOIDCompleta, include=TRUE, echo=FALSE}
+# Linezolid. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(topTabLIN,
+             col.names = gsub("[.]", " ", colnames(topTabLIN)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados LINEZOLID')
+
+```
+
+### Sin Tratamiento. Genes diferencialmente expresados Infectado y No Infectado
+
+```{R GenesSignificatosNoTratadosCompleta, include=TRUE,echo=FALSE}
+# NoTratados. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(topTabNOTTREAT,
+             col.names = gsub("[.]", " ", colnames(topTabNOTTREAT)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados No Tratados')
+
+```
+
+### Vancomicina. Genes diferencialmente expresados Infectado y No Infectado
+
+```{R GenesSignificatosVancomycinaCompleta, include=TRUE,echo=FALSE}
+# NoTratados. Visualización de la tabla Infectados vs No Infectados
+knitr::kable(topTabVAN,
+             col.names = gsub("[.]", " ", colnames(topTabVAN)),
+             booktabs = TRUE,
+             caption = 'Genes diferencialmente expresados. Vancomycina.')
+
+```
+
+
+\newpage
+
+## Apendice B. Tablas de genes anotados
+
+### Genes significativos anotados para el estudio con Linezolid
+
+```{R GenesAnotados4, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Linezolid
+knitr::kable(sortAnnotatedTopTabLIn[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")],
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Linezolid')
+
+```
+
+### Genes significativos anotados para el estudio sin tratamiento
+
+```{R GenesAnotados5, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste Sin Tratamiento
+knitr::kable(sortAnnotatedTopTabNOTTREAT[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                                 "ENTREZID")],
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Sin tratamiento')
+
+```
+
+### Genes significativos anotados para el estudio con Vancomizina
+
+```{R GenesAnotados6, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Vancomicina
+knitr::kable(sortAnnotatedTopTabVAN[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                            "ENTREZID")],
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Vancomizina')
+
+```
+
+### Genes significativos anotados comunes a los tres estudios
+
+```{R GenesAnotados8, include = FALSE}
+# Genes diferencialmente expresados y anotados para el contraste de Vancomicina
+knitr::kable(geneAnots_common[,c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                            "ENTREZID")],
+             col.names = gsub("[.]", " ", c("PROBEID","SYMBOL","GENENAME","ENSEMBL",
+                                             "ENTREZID")),
+             booktabs = TRUE,
+             aption = 'Principales genes diferencialmente expresados. Comunes')
+
+```
+## Apéndice C. Código
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+
+```
+
+
+
+
+
